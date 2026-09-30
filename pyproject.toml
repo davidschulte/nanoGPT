@@ -13,3 +13,20 @@ dependencies = [
     "transformers>=5.17.0",
     "wandb>=0.30.0",
 ]
+
+[tool.ruff]
+# Target Python version matching your nanoGPT environment
+target-version = "py310"
+# Standard line length (matching Black's default)
+line-length = 88
+
+[tool.ruff.lint]
+# Select specific rule sets:
+# E/W = Pycodestyle, F = Pyflakes, I = isort (import sorting), UP = Pyupgrade
+select = ["E", "W", "F", "I", "UP"]
+ignore = ["E261"]
+
+[tool.ruff.format]
+# Keep double quotes and trailing commas consistent with modern styling
+quote-style = "single"
+skip-magic-trailing-comma = false
