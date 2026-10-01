@@ -12,5 +12,7 @@ if __name__ == '__main__':
     new_tokenizer = old_tokenizer.train_new_from_iterator(
         batch_iterator(), vocab_size=5000
     )
+    new_tokenizer.eos_token = '<|endoftext|>'
+    new_tokenizer.bos_token = '<|endoftext|>'
 
     new_tokenizer.save_pretrained('./tokenizers/tinystories')
