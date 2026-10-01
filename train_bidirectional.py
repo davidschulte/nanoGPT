@@ -21,6 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import random
 
 import numpy as np
 import torch
@@ -44,14 +45,14 @@ wandb_log = False  # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2'  # 'run' + str(time.time())
 # data
-dataset = 'openwebtext'
+dataset = 'tinystories'
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
 batch_size = 12  # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
 # model
-n_layer = 12
-n_head = 12
-n_embd = 768
+n_layer = 1
+n_head = 1
+n_embd = 384
 dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
 bias = False  # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -70,7 +71,7 @@ min_lr = 6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinch
 backend = 'nccl'  # 'nccl', 'gloo', etc.
 # system
 device = (
-    'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+    'mps'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 )
 dtype = (
     'bfloat16'
@@ -86,7 +87,7 @@ config_keys = [
 ]
 exec(open('configurator.py').read())  # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys}  # will be useful for logging
-config['is_causal'] = True
+config['is_causal'] = False
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -142,6 +143,22 @@ def get_batch(split):
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
+
+    # Create between 1 and 8 sub-sequences to train the model on them in one go
+    num_attn_cutofss = random.randint(0, 7)
+    attn_borders = (
+        [0]
+        + sorted(random.sample(range(1, block_size), num_attn_cutofss))
+        + [block_size]
+    )
+
+    attn_blocks = []
+    for block_start, block_end in zip(attn_borders[:-1], attn_borders[1:]):
+        attn_block_size = block_end - block_start
+        attn_blocks.append(torch.ones((attn_block_size, attn_block_size)))
+
+    attn_mask = torch.block_diag(*attn_blocks)
+
     x = torch.stack(
         [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
     )
@@ -151,15 +168,23 @@ def get_batch(split):
             for i in ix
         ]
     )
+
+    # Mask all label tokens except for those at the end of the subsequences
+    y_mask = [
+        True if idx - 1 not in attn_borders[:-1] else False for idx in range(block_size)
+    ]
+    y[:, y_mask] = -1
+
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = (
+        x, y, attn_mask = (
             x.pin_memory().to(device, non_blocking=True),
             y.pin_memory().to(device, non_blocking=True),
+            attn_mask.pin_memory().to(device, non_blocking=True),
         )
     else:
-        x, y = x.to(device), y.to(device)
-    return x, y
+        x, y, attn_mask = x.to(device), y.to(device), attn_mask.to(device)
+    return x, y, attn_mask
 
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -184,6 +209,7 @@ model_args = dict(
     bias=bias,
     vocab_size=None,
     dropout=dropout,
+    is_causal=False,
 )  # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
@@ -265,9 +291,9 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y, attn_mask = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, loss = model(X, Y, attn_mask)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -296,7 +322,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train')  # fetch the very first batch
+X, Y, attn_mask = get_batch('train')  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
@@ -351,12 +377,12 @@ while True:
                 micro_step == gradient_accumulation_steps - 1
             )
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss = model(X, Y, attn_mask=attn_mask)
             loss = (
                 loss / gradient_accumulation_steps
             )  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y, attn_mask = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient

@@ -28,7 +28,7 @@ class LayerNorm(nn.Module):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
-class CausalSelfAttention(nn.Module):
+class SelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -42,21 +42,23 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.is_causal = config.is_causal
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print(
                 'WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0'
             )
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer(
-                'bias',
-                torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                    1, 1, config.block_size, config.block_size
-                ),
-            )
+            if self.is_causal:
+                # causal mask to ensure that attention is only applied to the left in the input sequence
+                self.register_buffer(
+                    'bias',
+                    torch.tril(torch.ones(config.block_size, config.block_size)).view(
+                        1, 1, config.block_size, config.block_size
+                    ),
+                )
 
-    def forward(self, x):
+    def forward(self, x, attn_mask=None):
         B, T, C = (
             x.size()
         )  # batch size, sequence length, embedding dimensionality (n_embd)
@@ -80,14 +82,15 @@ class CausalSelfAttention(nn.Module):
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=attn_mask,
                 dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
+                is_causal=self.is_causal,
             )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            if self.is_causal:
+                att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -120,12 +123,12 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = SelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, attn_mask=None):
+        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -139,6 +142,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    is_causal: bool = True
 
 
 class GPT(nn.Module):
@@ -198,7 +202,11 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, attn_mask=None):
+        assert attn_mask is None or not self.config.is_causal, (
+            'Custom attention masks are not implemented for causal models'
+        )
+
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, (
