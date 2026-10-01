@@ -170,9 +170,7 @@ def get_batch(split):
     )
 
     # Mask all label tokens except for those at the end of the subsequences
-    y_mask = [
-        True if idx - 1 not in attn_borders[:-1] else False for idx in range(block_size)
-    ]
+    y_mask = [idx + 1 not in attn_borders[:-1] for idx in range(block_size)]
     y[:, y_mask] = -1
 
     if device_type == 'cuda':
