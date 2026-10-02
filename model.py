@@ -91,6 +91,10 @@ class SelfAttention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             if self.is_causal:
                 att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            elif attn_mask is not None:
+                att = att.masked_fill(
+                    attn_mask[None, None, :][:, :, :T, :T] == 0, float('-inf')
+                )
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -219,7 +223,7 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, attn_mask=attn_mask)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
