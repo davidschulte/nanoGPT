@@ -206,9 +206,9 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, attn_mask=None):
-        assert attn_mask is None or not self.config.is_causal, (
-            'Custom attention masks are not implemented for causal models'
+    def forward(self, idx, targets=None, subsequence_lens=None):
+        assert subsequence_lens is None or not self.config.is_causal, (
+            'Sequence packing is not implemented for causal models'
         )
 
         device = idx.device
@@ -216,7 +216,31 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, (
             f'Cannot forward sequence of length {t}, block size is only {self.config.block_size}'
         )
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+
+        if subsequence_lens is None:
+            pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+            attn_mask = None
+            output_idx = torch.arange(0, t, dtype=torch.int).tolist()
+        else:
+            pos = torch.tensor(
+                [
+                    sub_pos
+                    # torch.arange(0, subsequence_len)
+                    for subsequence_len in subsequence_lens
+                    for sub_pos in torch.arange(0, subsequence_len)
+                ],
+                device=device,
+            )
+
+            attn_mask = torch.block_diag(
+                *[
+                    torch.ones((subsequence_len, subsequence_len))
+                    for subsequence_len in subsequence_lens
+                ],
+            ).to(device)
+            output_idx = [
+                sum(subsequence_lens[: i + 1]) - 1 for i in range(len(subsequence_lens))
+            ]
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
@@ -228,7 +252,9 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            logits = self.lm_head(x[:, output_idx, :])
+            targets = targets[:, output_idx]
+            # logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
             )

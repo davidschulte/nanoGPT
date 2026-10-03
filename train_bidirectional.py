@@ -146,19 +146,13 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
 
     # Create between 1 and 8 sub-sequences to train the model on them in one go
-    num_attn_cutofss = random.randint(0, 7)
-    attn_borders = (
+    num_subsequence_cutofss = min(random.randint(0, 15), block_size)
+    sub_sequence_boundaries = (
         [0]
-        + sorted(random.sample(range(1, block_size), num_attn_cutofss))
+        + sorted(random.sample(range(1, block_size), num_subsequence_cutofss))
         + [block_size]
     )
-
-    attn_blocks = []
-    for block_start, block_end in zip(attn_borders[:-1], attn_borders[1:]):
-        attn_block_size = block_end - block_start
-        attn_blocks.append(torch.ones((attn_block_size, attn_block_size)))
-
-    attn_mask = torch.block_diag(*attn_blocks)
+    subsequence_lens = torch.diff(torch.tensor(sub_sequence_boundaries)).tolist()
 
     x = torch.stack(
         [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
@@ -170,20 +164,20 @@ def get_batch(split):
         ]
     )
 
-    # Mask all label tokens except for those at the end of the subsequences
-    y_mask = [idx + 1 not in attn_borders[:-1] for idx in range(block_size)]
-    y[:, y_mask] = -1
-
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y, attn_mask = (
+        x, y, subsequence_lens = (
             x.pin_memory().to(device, non_blocking=True),
             y.pin_memory().to(device, non_blocking=True),
-            attn_mask.pin_memory().to(device, non_blocking=True),
+            subsequence_lens,
         )
     else:
-        x, y, attn_mask = x.to(device), y.to(device), attn_mask.to(device)
-    return x, y, attn_mask
+        x, y, subsequence_lens = (
+            x.to(device),
+            y.to(device),
+            subsequence_lens,
+        )
+    return x, y, subsequence_lens
 
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -290,9 +284,9 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y, attn_mask = get_batch(split)
+            X, Y, subsequence_lens = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y, attn_mask)
+                logits, loss = model(X, Y, subsequence_lens)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -321,7 +315,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y, attn_mask = get_batch('train')  # fetch the very first batch
+X, Y, subsequence_lens = get_batch('train')  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
@@ -376,12 +370,12 @@ while True:
                 micro_step == gradient_accumulation_steps - 1
             )
         with ctx:
-            logits, loss = model(X, Y, attn_mask=attn_mask)
+            logits, loss = model(X, Y, subsequence_lens=subsequence_lens)
             loss = (
                 loss / gradient_accumulation_steps
             )  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y, attn_mask = get_batch('train')
+        X, Y, subsequence_lens = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
