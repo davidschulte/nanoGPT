@@ -33,27 +33,27 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-is_causal = False
+is_causal = True
 out_dir = 'out'
-eval_interval = 4
+eval_interval = 500
 log_interval = 1
-eval_iters = 4
+eval_iters = 200
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = True  # if True, always save a checkpoint after each eval
 init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False  # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2'  # 'run' + str(time.time())
+wandb_project = 'nanogpt'
+wandb_run_name = 'tiny_causal_5'  # 'run' + str(time.time())
 # data
 dataset = 'tinystories'
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
-batch_size = 4  # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 128
+batch_size = 12  # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 1024
 vocab_size = 5000
 # model
-n_layer = 1
-n_head = 1
+n_layer = 4
+n_head = 4
 n_embd = 384
 dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
 bias = False  # do we use bias inside LayerNorm and Linear layers?
