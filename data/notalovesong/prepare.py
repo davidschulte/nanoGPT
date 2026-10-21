@@ -32,7 +32,7 @@ if __name__ == '__main__':
 
     split = Dataset.from_dict({'text': raw_datset})
 
-    dataset = DatasetDict({'train': split, 'validation': split})
+    dataset = DatasetDict({'train': split, 'val': split})
     # tokenize the dataset
     tokenized = dataset.map(
         tokenize,
