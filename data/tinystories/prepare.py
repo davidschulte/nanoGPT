@@ -16,7 +16,7 @@ num_proc = 8
 # it is better than 1 usually though
 num_proc_load_dataset = num_proc
 
-tokenizer = AutoTokenizer.from_pretrained('../../tokenizers/tinystories')
+tokenizer = AutoTokenizer.from_pretrained('tokenizers/tinystories')
 
 if __name__ == '__main__':
     # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
