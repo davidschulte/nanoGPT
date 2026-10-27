@@ -130,7 +130,7 @@ ptdtype = {
 ctx = (
     nullcontext()
     if device_type == 'cpu'
-    else torch.amp.au + tocast(device_type=device_type, dtype=ptdtype)
+    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 )
 
 # poor man's data loader
