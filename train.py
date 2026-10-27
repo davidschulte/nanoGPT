@@ -346,6 +346,7 @@ while True:
                     'val/loss': losses['val'],
                     'lr': lr,
                     'mfu': running_mfu * 100,  # convert to percentage
+                    'subsequence_len': subsequence_len,
                 }
             )
         if losses['val'] < best_val_loss or always_save_checkpoint:
