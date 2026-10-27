@@ -130,14 +130,18 @@ ptdtype = {
 ctx = (
     nullcontext()
     if device_type == 'cpu'
-    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+    else torch.amp.au + tocast(device_type=device_type, dtype=ptdtype)
 )
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
 
 
-def get_batch(split):
+def _get_subseq_len(i, num_repeat=10):
+    return i % (block_size * num_repeat) // num_repeat + 1
+
+
+def get_batch(split, subseq_len):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
@@ -149,14 +153,10 @@ def get_batch(split):
     if is_causal:
         subsequence_lens = None
     else:
-        # Create between 1 and 8 sub-sequences to train the model on them in one go
-        num_subsequence_cutofss = min(random.randint(0, 15), block_size)
-        sub_sequence_boundaries = (
-            [0]
-            + sorted(random.sample(range(1, block_size), num_subsequence_cutofss))
-            + [block_size]
-        )
-        subsequence_lens = torch.diff(torch.tensor(sub_sequence_boundaries)).tolist()
+        subsequence_lens = [subseq_len for _ in range(block_size // subseq_len)]
+        extra_seq_len = block_size % subseq_len
+        if extra_seq_len > 0:
+            subsequence_lens.append(extra_seq_len)
 
     x = torch.stack(
         [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
@@ -288,7 +288,8 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y, subsequence_lens = get_batch(split)
+            subseq_len = _get_subseq_len(k)
+            X, Y, subsequence_lens = get_batch(split, subseq_len)
             with ctx:
                 logits, loss = model(X, Y, subsequence_lens)
             losses[k] = loss.item()
@@ -319,7 +320,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y, subsequence_lens = get_batch('train')  # fetch the very first batch
+X, Y, subsequence_lens = get_batch('train', subseq_len=1)  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
@@ -327,6 +328,7 @@ running_mfu = -1.0
 while True:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
+    subsequence_len = _get_subseq_len(iter_num)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -379,7 +381,7 @@ while True:
                 loss / gradient_accumulation_steps
             )  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y, subsequence_lens = get_batch('train')
+        X, Y, subsequence_lens = get_batch('train', subseq_len=subsequence_len)
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
