@@ -288,7 +288,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            subseq_len = _get_subseq_len(k)
+            subseq_len = _get_subseq_len(k, num_repeat=1)
             X, Y, subsequence_lens = get_batch(split, subseq_len)
             with ctx:
                 logits, loss = model(X, Y, subsequence_lens)
