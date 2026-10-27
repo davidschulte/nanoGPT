@@ -37,7 +37,7 @@ is_causal = True
 out_dir = 'out'
 eval_interval = 500
 log_interval = 1
-eval_iters = 200
+eval_iters = 512
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = True  # if True, always save a checkpoint after each eval
 init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
@@ -49,7 +49,7 @@ wandb_run_name = 'tiny_causal_5'  # 'run' + str(time.time())
 dataset = 'tinystories'
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
 batch_size = 12  # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+block_size = 512
 vocab_size = 5000
 # model
 n_layer = 4
