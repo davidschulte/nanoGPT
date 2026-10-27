@@ -37,7 +37,7 @@ is_causal = True
 out_dir = 'out'
 eval_interval = 500
 log_interval = 1
-eval_iters = 512
+eval_iters = 128
 eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = True  # if True, always save a checkpoint after each eval
 init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
@@ -283,12 +283,13 @@ if ddp:
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
+    sub_seqlen_multiplier = eval_iters // block_size
     out = {}
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            subseq_len = _get_subseq_len(k, num_repeat=1)
+            subseq_len = _get_subseq_len(k * sub_seqlen_multiplier, num_repeat=1)
             X, Y, subsequence_lens = get_batch(split, subseq_len)
             with ctx:
                 logits, loss = model(X, Y, subsequence_lens)
