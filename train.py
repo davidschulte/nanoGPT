@@ -283,7 +283,10 @@ if ddp:
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
-    sub_seqlen_multiplier = eval_iters // block_size
+    if block_size > eval_iters:
+        sub_seqlen_multiplier = block_size // eval_iters
+    else:
+        sub_seqlen_multiplier = 1
     out = {}
     model.eval()
     for split in ['train', 'val']:
