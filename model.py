@@ -237,7 +237,7 @@ class GPT(nn.Module):
                     torch.ones((subsequence_len, subsequence_len))
                     for subsequence_len in subsequence_lens
                 ],
-            ).to(device)
+            ).to(device, dtype=torch.bool)
             output_idx = [
                 sum(subsequence_lens[: i + 1]) - 1 for i in range(len(subsequence_lens))
             ]
