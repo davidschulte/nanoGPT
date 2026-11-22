@@ -58,7 +58,7 @@ class SelfAttention(nn.Module):
                     ),
                 )
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_masks=None):
         B, T, C = (
             x.size()
         )  # batch size, sequence length, embedding dimensionality (n_embd)
@@ -82,7 +82,7 @@ class SelfAttention(nn.Module):
                 q,
                 k,
                 v,
-                attn_mask=attn_mask,
+                attn_mask=attn_masks.unsqueeze(1),
                 dropout_p=self.dropout if self.training else 0,
                 is_causal=self.is_causal,
             )
@@ -91,9 +91,9 @@ class SelfAttention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             if self.is_causal:
                 att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-            elif attn_mask is not None:
+            elif attn_masks is not None:
                 att = att.masked_fill(
-                    attn_mask[None, None, :][:, :, :T, :T] == 0, float('-inf')
+                    attn_masks[None, :][:, :, :T, :T] == 0, float('-inf')
                 )
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -131,8 +131,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, attn_mask=None):
-        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
+    def forward(self, x, attn_masks=None):
+        x = x + self.attn(self.ln_1(x), attn_masks=attn_masks)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -206,8 +206,8 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, subsequence_lens=None):
-        assert subsequence_lens is None or not self.config.is_causal, (
+    def forward(self, idx, targets=None, cutoff_idxs=None):
+        assert cutoff_idxs is None or not self.config.is_causal, (
             'Sequence packing is not implemented for causal models'
         )
 
@@ -217,43 +217,50 @@ class GPT(nn.Module):
             f'Cannot forward sequence of length {t}, block size is only {self.config.block_size}'
         )
 
-        if subsequence_lens is None:
+        if cutoff_idxs is None:
             pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
-            attn_mask = None
-            output_idx = torch.arange(0, t, dtype=torch.int).tolist()
+            attn_masks = None
+            output_idxs = (
+                torch.arange(0, t, dtype=torch.int)
+                .unsqueeze(0)
+                .expand(b, -1)
+                .to(device)
+            )
         else:
             pos = torch.tensor(
                 [
-                    sub_pos
-                    # torch.arange(0, subsequence_len)
-                    for subsequence_len in subsequence_lens
-                    for sub_pos in torch.arange(0, subsequence_len)
+                    list(range(cutoff_idx)) + list(range(t - cutoff_idx))
+                    for cutoff_idx in cutoff_idxs
                 ],
                 device=device,
             )
 
-            attn_mask = torch.block_diag(
-                *[
-                    torch.ones((subsequence_len, subsequence_len))
-                    for subsequence_len in subsequence_lens
-                ],
+            attn_masks = torch.stack(
+                [
+                    torch.block_diag(
+                        torch.ones((cutoff_idx, cutoff_idx)),
+                        torch.ones((t - cutoff_idx, t - cutoff_idx)),
+                    )
+                    for cutoff_idx in cutoff_idxs
+                ]
             ).to(device, dtype=torch.bool)
-            output_idx = [
-                sum(subsequence_lens[: i + 1]) - 1 for i in range(len(subsequence_lens))
-            ]
+            output_idxs = torch.tensor(
+                [[cutoff_idx - 1, t - 1] for cutoff_idx in cutoff_idxs]
+            ).to(device)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x, attn_mask=attn_mask)
+            x = block(x, attn_masks=attn_masks)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x[:, output_idx, :])
-            targets = targets[:, output_idx]
+            # logits = self.lm_head(x[:, output_idx, :])
+            logits = self.lm_head(x[output_idxs, :])
+            targets = targets[output_idxs]
             # logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1

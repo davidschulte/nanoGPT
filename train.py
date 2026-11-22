@@ -33,7 +33,7 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-is_causal = True
+is_causal = False
 out_dir = 'out'
 eval_interval = 500
 log_interval = 1
@@ -47,10 +47,12 @@ wandb_project = 'nanogpt'
 wandb_run_name = 'tiny_causal_5'  # 'run' + str(time.time())
 # data
 dataset = 'tinystories'
-gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
-batch_size = 12  # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 512
-vocab_size = 5000
+gradient_accumulation_steps = 1  # used to simulate larger batch sizes
+block_size = 512 + 1
+batch_size = (
+    block_size // 2
+)  # if gradient_accumulation_steps > 1, this is the micro-batch size
+vocab_size = 2**13
 # model
 n_layer = 4
 n_head = 4
@@ -64,7 +66,6 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
-subseq_len_repeat = 1
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 2000  # how many steps to warm up for
@@ -74,7 +75,7 @@ min_lr = 6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinch
 backend = 'nccl'  # 'nccl', 'gloo', etc.
 # system
 device = (
-    'mps'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+    'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 )
 dtype = (
     'bfloat16'
@@ -138,11 +139,7 @@ ctx = (
 data_dir = os.path.join('data', dataset)
 
 
-def _get_subseq_len(i, num_repeat=subseq_len_repeat):
-    return i % (block_size * num_repeat) // num_repeat + 1
-
-
-def get_batch(split, subseq_len):
+def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
@@ -152,12 +149,9 @@ def get_batch(split, subseq_len):
     ix = torch.randint(len(data) - block_size, (batch_size,))
 
     if is_causal:
-        subsequence_lens = None
+        cutoff_idxs = None
     else:
-        subsequence_lens = [subseq_len for _ in range(block_size // subseq_len)]
-        extra_seq_len = block_size % subseq_len
-        if extra_seq_len > 0:
-            subsequence_lens.append(extra_seq_len)
+        cutoff_idxs = list(range(1, batch_size + 1))
 
     x = torch.stack(
         [torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix]
@@ -171,18 +165,16 @@ def get_batch(split, subseq_len):
 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y, subsequence_lens = (
+        x, y = (
             x.pin_memory().to(device, non_blocking=True),
             y.pin_memory().to(device, non_blocking=True),
-            subsequence_lens,
         )
     else:
-        x, y, subsequence_lens = (
+        x, y = (
             x.to(device),
             y.to(device),
-            subsequence_lens,
         )
-    return x, y, subsequence_lens
+    return x, y, cutoff_idxs
 
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -284,19 +276,14 @@ if ddp:
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
-    if block_size > eval_iters:
-        sub_seqlen_multiplier = block_size // eval_iters
-    else:
-        sub_seqlen_multiplier = 1
     out = {}
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            subseq_len = _get_subseq_len(k * sub_seqlen_multiplier, num_repeat=1)
-            X, Y, subsequence_lens = get_batch(split, subseq_len)
+            X, Y, cutoff_idxs = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y, subsequence_lens)
+                logits, loss = model(X, Y, cutoff_idxs)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -325,7 +312,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y, subsequence_lens = get_batch('train', subseq_len=1)  # fetch the very first batch
+X, Y, cutoff_idxs = get_batch('train')  # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0  # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model  # unwrap DDP container if needed
@@ -333,7 +320,6 @@ running_mfu = -1.0
 while True:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
-    subsequence_len = _get_subseq_len(iter_num)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -351,7 +337,6 @@ while True:
                     'val/loss': losses['val'],
                     'lr': lr,
                     'mfu': running_mfu * 100,  # convert to percentage
-                    'subsequence_len': subsequence_len,
                 }
             )
         if losses['val'] < best_val_loss or always_save_checkpoint:
@@ -382,12 +367,12 @@ while True:
                 micro_step == gradient_accumulation_steps - 1
             )
         with ctx:
-            logits, loss = model(X, Y, subsequence_lens=subsequence_lens)
+            logits, loss = model(X, Y, cutoff_idxs=cutoff_idxs)
             loss = (
                 loss / gradient_accumulation_steps
             )  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y, subsequence_lens = get_batch('train', subseq_len=subsequence_len)
+        X, Y, cutoff_idxs = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
