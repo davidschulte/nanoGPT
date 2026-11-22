@@ -64,6 +64,7 @@ weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
+subseq_len_repeat = 1
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 2000  # how many steps to warm up for
@@ -137,7 +138,7 @@ ctx = (
 data_dir = os.path.join('data', dataset)
 
 
-def _get_subseq_len(i, num_repeat=10):
+def _get_subseq_len(i, num_repeat=subseq_len_repeat):
     return i % (block_size * num_repeat) // num_repeat + 1
 
 
