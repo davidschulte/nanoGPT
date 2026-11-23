@@ -259,9 +259,11 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             # logits = self.lm_head(x[:, output_idx, :])
-            logits = self.lm_head(x[output_idxs, :])
-            targets = targets[output_idxs]
-            # logits = self.lm_head(x)
+            logits = self.lm_head(
+                torch.take_along_dim(x, output_idxs.unsqueeze(-1), dim=1)
+            )
+
+            targets = torch.take_along_dim(targets, output_idxs, dim=1)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
             )
