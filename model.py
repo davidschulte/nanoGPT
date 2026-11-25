@@ -233,8 +233,8 @@ class GPT(nn.Module):
             attn_masks = torch.stack(
                 [
                     torch.block_diag(
-                        torch.ones((cutoff_idx, cutoff_idx)),
-                        torch.ones((t - cutoff_idx, t - cutoff_idx)),
+                        torch.ones((cutoff_idx, cutoff_idx), device=device),
+                        torch.ones((t - cutoff_idx, t - cutoff_idx), device=device),
                     )
                     for cutoff_idx in cutoff_idxs
                 ]
