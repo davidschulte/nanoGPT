@@ -93,7 +93,7 @@ class SelfAttention(nn.Module):
                 att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
             elif attn_masks is not None:
                 att = att.masked_fill(
-                    attn_masks[None, :][:, :, :T, :T] == 0, float('-inf')
+                    attn_masks[:, None][:, :, :T, :T] == 0, float('-inf')
                 )
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
