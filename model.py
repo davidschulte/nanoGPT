@@ -82,7 +82,7 @@ class SelfAttention(nn.Module):
                 q,
                 k,
                 v,
-                attn_mask=attn_masks.unsqueeze(1),
+                attn_mask=attn_masks.unsqueeze(1) if attn_masks is not None else None,
                 dropout_p=self.dropout if self.training else 0,
                 is_causal=self.is_causal,
             )
@@ -220,12 +220,7 @@ class GPT(nn.Module):
         if cutoff_idxs is None:
             pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
             attn_masks = None
-            output_idxs = (
-                torch.arange(0, t, dtype=torch.int)
-                .unsqueeze(0)
-                .expand(b, -1)
-                .to(device)
-            )
+            output_idxs = None
         else:
             pos = torch.tensor(
                 [
@@ -259,11 +254,12 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             # logits = self.lm_head(x[:, output_idx, :])
-            logits = self.lm_head(
-                torch.take_along_dim(x, output_idxs.unsqueeze(-1), dim=1)
-            )
+            if output_idxs is not None:
+                x = torch.take_along_dim(x, output_idxs.unsqueeze(-1), dim=1)
+                targets = torch.take_along_dim(targets, output_idxs, dim=1)
 
-            targets = torch.take_along_dim(targets, output_idxs, dim=1)
+            logits = self.lm_head(x)
+
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
             )
